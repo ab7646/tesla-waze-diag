@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>אבחון דפדפן – Waze לטסלה</title>
+<style>
+  :root { --bg:#111418; --card:#1b2027; --line:#2c333d; --text:#e8ecf1; --muted:#9aa4b2;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --run:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:18px/1.5 system-ui, "Segoe UI", Arial, sans-serif; padding:16px 20px 40px; }
+  h1 { font-size:26px; font-weight:600; margin:0 0 4px; }
+  h2 { font-size:20px; font-weight:600; margin:28px 0 10px; }
+  .sub { color:var(--muted); margin:0 0 16px; }
+  button { font:inherit; font-size:20px; padding:12px 22px; border-radius:10px; border:1px solid var(--line); background:#24406b; color:#fff; cursor:pointer; margin-left:8px; }
+  button.secondary { background:var(--card); }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:12px; overflow:hidden; }
+  td { padding:10px 14px; border-bottom:1px solid var(--line); vertical-align:top; }
+  td.name { width:30%; font-weight:600; }
+  td.st { width:110px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:15px; font-weight:600; }
+  .ok { background:#12361d; color:var(--ok); } .warn { background:#3a2c0b; color:var(--warn); }
+  .bad { background:#3d1418; color:var(--bad); } .run { background:#0f2a4a; color:var(--run); }
+  .detail { color:var(--muted); font-size:16px; word-break:break-word; }
+  .live { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; }
+  .panel h3 { margin:0 0 8px; font-size:17px; }
+  .panel canvas, .panel video { width:100%; aspect-ratio:16/9; background:#000; border-radius:8px; display:block; }
+  .metric { font-size:16px; color:var(--muted); margin-top:8px; }
+  .metric b { color:var(--text); font-size:20px; }
+  #pad { position:relative; height:340px; background:var(--card); border:2px dashed var(--line); border-radius:12px; touch-action:none; user-select:none; overflow:hidden; }
+  #pad canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #padInfo { position:absolute; top:10px; right:14px; color:var(--muted); font-size:16px; pointer-events:none; }
+  textarea { width:100%; height:220px; background:#0b0d10; color:var(--text); border:1px solid var(--line); border-radius:10px; font:14px/1.4 Consolas, monospace; padding:10px; direction:ltr; }
+  .note { color:var(--muted); font-size:15px; }
+</style>
+</head>
+<body>
+<h1>אבחון דפדפן להקרנת Waze</h1>
+<p class="sub">בודק שהדפדפן יודע לקבל וידאו מהטלפון, להציג אותו ולשלוח נגיעות חזרה. מיועד ל-Island בלפטופ ולדפדפן של הטסלה.</p>
+<button id="runBtn">הרץ בדיקות</button>
+<button id="fsBtn" class="secondary">מסך מלא</button>
+
+<h2>תוצאות</h2>
+<table id="results"></table>
+
+<h2>בדיקה חיה (ממשיכה לרוץ – השאר את הדף פתוח בזמן נסיעה)</h2>
+<div class="live">
+  <div class="panel">
+    <h3>1. Canvas (ציור ישיר)</h3>
+    <canvas id="cvAnim" width="640" height="360"></canvas>
+    <div class="metric">פריימים לשנייה: <b id="mAnim">–</b> · שניות שנעצר: <b id="sAnim">0</b></div>
+  </div>
+  <div class="panel">
+    <h3>2. אלמנט Video</h3>
+    <video id="vid" muted playsinline autoplay></video>
+    <div class="metric">פריימים לשנייה: <b id="mVid">–</b> · שניות שנעצר: <b id="sVid">0</b></div>
+  </div>
+  <div class="panel">
+    <h3>3. WebCodecs: קידוד H.264, פענוח וציור</h3>
+    <canvas id="cvDec" width="640" height="360"></canvas>
+    <div class="metric">פריימים לשנייה: <b id="mDec">–</b> · השהיה: <b id="lDec">–</b> · שניות שנעצר: <b id="sDec">0</b></div>
+  </div>
+</div>
+<p class="note">פאנל 3 הוא השיטה שבה האפליקציה תעבוד בפועל. אם בזמן נסיעה פאנל 2 נעצר ופאנל 3 ממשיך לרוץ, הגישה מתאימה לטסלה.</p>
+
+<h2>בדיקת מגע</h2>
+<div id="pad"><canvas id="padCv"></canvas><div id="padInfo">גע כאן באצבע אחת, אחר כך בשתיים, ונסה גרירה וצביטה</div></div>
+
+<h2>סיכום להעתקה</h2>
+<button id="copyBtn" class="secondary">העתק סיכום</button>
+<textarea id="summary" readonly></textarea>
+<p class="note">אם ההעתקה לא עובדת (בטסלה), צלם את המסך בטלפון.</p>
+
+<script>
+'use strict';
+const rows = new Map();
+const tbl = document.getElementById('results');
+const LABEL = { ok:'עובר', warn:'אזהרה', bad:'נכשל', run:'בודק…' };
+
+function row(id, name) {
+  if (rows.has(id)) return;
+  const tr = document.createElement('tr');
+  tr.innerHTML = '<td class="name"></td><td class="st"><span class="badge run">' + LABEL.run + '</span></td><td class="detail"></td>';
+  tr.cells[0].textContent = name;
+  tbl.appendChild(tr);
+  rows.set(id, { tr, name, status:'run', detail:'' });
+}
+function set(id, status, detail) {
+  const r = rows.get(id); if (!r) return;
+  r.status = status; r.detail = detail || '';
+  r.tr.cells[1].innerHTML = '<span class="badge ' + status + '">' + LABEL[status] + '</span>';
+  r.tr.cells[2].textContent = r.detail;
+  updateSummary();
+}
+const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg || 'timeout')), ms))]);
+
+// ---------- static tests ----------
+function testEnv() {
+  row('env', 'דפדפן ומסך');
+  const ua = navigator.userAgent;
+  const chrome = (ua.match(/Chrom(?:e|ium)\/(\d+)/) || [])[1];
+  const isTesla = /Tesla/i.test(ua);
+  set('env', chrome ? 'ok' : 'warn',
+    (isTesla ? 'Tesla · ' : '') + 'Chromium ' + (chrome || 'לא זוהה') +
+    ' · מסך ' + screen.width + '×' + screen.height + ' · חלון ' + innerWidth + '×' + innerHeight +
+    ' · DPR ' + devicePixelRatio);
+  row('ua', 'User-Agent');
+  set('ua', 'ok', ua);
+  row('secure', 'הקשר מאובטח (HTTPS)');
+  set('secure', isSecureContext ? 'ok' : 'bad', isSecureContext ? location.protocol : 'הדף לא נטען ב-HTTPS, ו-WebCodecs דורש HTTPS');
+}
+
+async function testWebRTCLoopback() {
+  row('rtc', 'WebRTC DataChannel (מקומי)');
+  if (!window.RTCPeerConnection) return set('rtc', 'bad', 'RTCPeerConnection לא קיים');
+  const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+  try {
+    a.onicecandidate = e => e.candidate && b.addIceCandidate(e.candidate).catch(() => {});
+    b.onicecandidate = e => e.candidate && a.addIceCandidate(e.candidate).catch(() => {});
+    const dc = a.createDataChannel('t');
+    const opened = new Promise(r => dc.onopen = r);
+    const got = new Promise(r => b.ondatachannel = e => e.channel.onmessage = m => r(m.data));
+    await a.setLocalDescription(await a.createOffer());
+    await b.setRemoteDescription(a.localDescription);
+    await b.setLocalDescription(await b.createAnswer());
+    await a.setRemoteDescription(b.localDescription);
+    await withTimeout(opened, 8000, 'הערוץ לא נפתח');
+    const t0 = performance.now(); dc.send('ping');
+    await withTimeout(got, 5000, 'ההודעה לא הגיעה');
+    set('rtc', 'ok', 'ערוץ נתונים נפתח, זמן הלוך ' + (performance.now() - t0).toFixed(1) + ' ms');
+  } catch (e) { set('rtc', 'bad', e.message); }
+  finally { a.close(); b.close(); }
+}
+
+async function testStun() {
+  row('stun', 'יציאה לאינטרנט ב-UDP (STUN)');
+  if (!window.RTCPeerConnection) return set('stun', 'bad', 'אין WebRTC');
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  const types = new Set();
+  try {
+    pc.createDataChannel('x');
+    const done = new Promise(r => {
+      pc.onicecandidate = e => {
+        if (!e.candidate) return r();
+        const t = e.candidate.type || (e.candidate.candidate.match(/ typ (\w+)/) || [])[1];
+        if (t) types.add(t);
+      };
+    });
+    await pc.setLocalDescription(await pc.createOffer());
+    await withTimeout(done, 7000).catch(() => {});
+    if (types.has('srflx')) set('stun', 'ok', 'נמצאה כתובת ציבורית, כך שחיבור ישיר אפשרי. סוגים: ' + [...types].join(', '));
+    else set('stun', 'warn', 'אין כתובת ציבורית, כנראה UDP חסום (נפוץ ברשת ארגונית). נצטרך TURN על פורט 443. סוגים: ' + ([...types].join(', ') || 'אין'));
+  } catch (e) { set('stun', 'bad', e.message); }
+  finally { pc.close(); }
+}
+
+async function testWebSocket() {
+  row('ws', 'WebSocket מאובטח לשרת חיצוני');
+  if (!window.WebSocket) return set('ws', 'bad', 'WebSocket לא קיים');
+  try {
+    const ws = new WebSocket('wss://echo.websocket.org');
+    const t0 = performance.now();
+    await withTimeout(new Promise((res, rej) => {
+      ws.onmessage = m => { if (String(m.data).includes('diag-ping')) res(); };
+      ws.onopen = () => ws.send('diag-ping');
+      ws.onerror = () => rej(new Error('החיבור נכשל'));
+    }), 6000, 'אין תשובה תוך 6 שניות');
+    set('ws', 'ok', 'זמן הלוך ושוב ' + (performance.now() - t0).toFixed(0) + ' ms');
+    ws.close();
+  } catch (e) { set('ws', 'warn', e.message + ' (ייתכן ששרת הבדיקה החיצוני לא זמין, זה לא בהכרח חסימה)'); }
+}
+
+async function testWebCodecs() {
+  row('dec', 'WebCodecs: פענוח H.264');
+  row('enc', 'WebCodecs: קידוד H.264 (לבדיקה בלבד)');
+  if (!('VideoDecoder' in window)) { set('dec', 'bad', 'VideoDecoder לא קיים. נצטרך מפענח WASM כגיבוי'); set('enc', 'warn', 'לא נבדק'); return false; }
+  const cfg = { codec: 'avc1.42E01F', codedWidth: 1280, codedHeight: 720 };
+  try {
+    const sw = await VideoDecoder.isConfigSupported(cfg);
+    const hw = await VideoDecoder.isConfigSupported({ ...cfg, hardwareAcceleration: 'prefer-hardware' }).catch(() => ({ supported: false }));
+    set('dec', sw.supported ? 'ok' : 'bad', sw.supported ? ('נתמך' + (hw.supported ? ', כולל האצת חומרה' : ', ללא אישור להאצת חומרה')) : 'H.264 לא נתמך');
+  } catch (e) { set('dec', 'bad', e.message); return false; }
+  if (!('VideoEncoder' in window)) { set('enc', 'warn', 'אין VideoEncoder, ולכן אין בדיקה חיה. זה לא נחוץ לאפליקציה עצמה'); return false; }
+  try {
+    const s = await VideoEncoder.isConfigSupported({ codec: 'avc1.42E01F', width: 1280, height: 720, bitrate: 2e6, framerate: 30 });
+    set('enc', s.supported ? 'ok' : 'warn', s.supported ? 'נתמך, ופאנל 3 רץ' : 'לא נתמך, ולכן אין בדיקה חיה. זה לא נחוץ לאפליקציה עצמה');
+    return s.supported;
+  } catch (e) { set('enc', 'warn', e.message); return false; }
+}
+
+function testMisc() {
+  row('webgl', 'WebGL');
+  const c = document.createElement('canvas');
+  const gl2 = c.getContext('webgl2'), gl = gl2 || c.getContext('webgl');
+  set('webgl', gl ? 'ok' : 'warn', gl2 ? 'WebGL2' : gl ? 'WebGL1' : 'לא זמין');
+  row('fs', 'מסך מלא');
+  set('fs', document.fullscreenEnabled ? 'ok' : 'warn', document.fullscreenEnabled ? 'נתמך. לחץ על "מסך מלא" כדי לנסות' : 'לא נתמך');
+  row('touch', 'מגע');
+  set('touch', 'run', 'מספר נגיעות מקסימלי שהמכשיר מדווח: ' + navigator.maxTouchPoints + '. גע באזור הבדיקה למטה');
+  row('multi', 'מגע בשתי אצבעות');
+  set('multi', 'run', 'שים שתי אצבעות על אזור הבדיקה בבת אחת');
+}
+
+// ---------- live tests ----------
+const live = {
+  anim: { frames:0, fps:null, stalls:0, el:'mAnim', st:'sAnim' },
+  vid:  { frames:0, fps:null, stalls:0, el:'mVid',  st:'sVid'  },
+  dec:  { frames:0, fps:null, stalls:0, el:'mDec',  st:'sDec', lat:null }
+};
+let liveStarted = 0;
+
+function drawScene(ctx, w, h, t, label) {
+  ctx.fillStyle = '#0d1b2a'; ctx.fillRect(0, 0, w, h);
+  const x = (Math.sin(t / 700) * 0.4 + 0.5) * w;
+  ctx.fillStyle = '#58a6ff'; ctx.beginPath(); ctx.arc(x, h / 2, h / 7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.round(h / 9) + 'px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText(new Date().toLocaleTimeString('he-IL') + '.' + String(Math.floor(t % 1000)).padStart(3, '0'), w / 2, h * 0.85);
+  ctx.font = Math.round(h / 14) + 'px system-ui'; ctx.fillText(label, w / 2, h * 0.15);
+}
+
+function startAnim() {
+  const cv = document.getElementById('cvAnim'), ctx = cv.getContext('2d');
+  const loop = t => { drawScene(ctx, cv.width, cv.height, t, 'Canvas'); live.anim.frames++; requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+  // video element fed from canvas.captureStream
+  const v = document.getElementById('vid');
+  if (cv.captureStream) {
+    v.srcObject = cv.captureStream(30);
+    v.play().catch(() => {});
+    if (v.requestVideoFrameCallback) {
+      const cb = () => { live.vid.frames++; v.requestVideoFrameCallback(cb); };
+      v.requestVideoFrameCallback(cb);
+    } else {
+      let last = -1;
+      setInterval(() => { if (v.currentTime !== last) { live.vid.frames++; last = v.currentTime; } }, 33);
+    }
+  }
+}
+
+function startCodecLoop() {
+  const src = document.createElement('canvas'); src.width = 1280; src.height = 720;
+  const sctx = src.getContext('2d');
+  const out = document.getElementById('cvDec'), octx = out.getContext('2d');
+  const sent = new Map();
+  let configured = false, n = 0;
+  const dec = new VideoDecoder({
+    output: f => {
+      octx.drawImage(f, 0, 0, out.width, out.height);
+      const t0 = sent.get(f.timestamp); if (t0) { live.dec.lat = performance.now() - t0; sent.delete(f.timestamp); }
+      live.dec.frames++; f.close();
+    },
+    error: e => set('enc', 'bad', 'שגיאת פענוח: ' + e.message)
+  });
+  const enc = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (!configured) {
+        if (!meta || !meta.decoderConfig) return;
+        dec.configure(meta.decoderConfig); configured = true;
+      }
+      dec.decode(chunk);
+    },
+    error: e => set('enc', 'bad', 'שגיאת קידוד: ' + e.message)
+  });
+  enc.configure({ codec: 'avc1.42E01F', width: 1280, height: 720, bitrate: 2e6, framerate: 30, latencyMode: 'realtime' });
+  setInterval(() => {
+    if (enc.encodeQueueSize > 2 || dec.decodeQueueSize > 2) return;
+    const now = performance.now();
+    drawScene(sctx, 1280, 720, now, 'H.264 → WebCodecs');
+    const ts = Math.round(now * 1000);
+    const f = new VideoFrame(src, { timestamp: ts });
+    sent.set(ts, now);
+    enc.encode(f, { keyFrame: n++ % 60 === 0 }); f.close();
+    if (sent.size > 120) sent.delete(sent.keys().next().value);
+  }, 33);
+}
+
+setInterval(() => {
+  const warm = liveStarted && performance.now() - liveStarted > 4000;
+  for (const k in live) {
+    const m = live[k]; m.fps = m.frames; m.frames = 0;
+    if (!liveStarted) continue;
+    document.getElementById(m.el).textContent = m.fps;
+    if (warm && m.fps === 0 && (k !== 'dec' || codecLive) && (k !== 'vid' || vidLive)) m.stalls++;
+    document.getElementById(m.st).textContent = m.stalls;
+  }
+  if (live.dec.lat != null) document.getElementById('lDec').textContent = live.dec.lat.toFixed(0) + ' ms';
+  updateSummary();
+}, 1000);
+
+// ---------- touch pad ----------
+(function initPad() {
+  const pad = document.getElementById('pad'), cv = document.getElementById('padCv'), info = document.getElementById('padInfo');
+  const ctx = cv.getContext('2d');
+  const active = new Map(); let maxTouch = 0, types = new Set(), moves = 0;
+  const resize = () => { cv.width = pad.clientWidth * devicePixelRatio; cv.height = pad.clientHeight * devicePixelRatio; };
+  resize(); addEventListener('resize', resize);
+  const draw = () => {
+    ctx.fillStyle = 'rgba(27,32,39,0.25)'; ctx.fillRect(0, 0, cv.width, cv.height);
+    for (const [id, p] of active) {
+      ctx.fillStyle = id % 2 ? '#3fb950' : '#58a6ff';
+      ctx.beginPath(); ctx.arc(p.x * devicePixelRatio, p.y * devicePixelRatio, 28 * devicePixelRatio, 0, Math.PI * 2); ctx.fill();
+    }
+    requestAnimationFrame(draw);
+  };
+  requestAnimationFrame(draw);
+  const pos = e => { const r = pad.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const report = (e) => {
+    const p = pos(e);
+    info.textContent = 'סוג: ' + e.pointerType + ' · אצבעות כרגע: ' + active.size + ' · מקסימום: ' + maxTouch +
+      ' · x=' + Math.round(p.x) + ' y=' + Math.round(p.y) + ' · תנועות: ' + moves;
+  };
+  pad.addEventListener('pointerdown', e => {
+    pad.setPointerCapture(e.pointerId); active.set(e.pointerId, pos(e)); types.add(e.pointerType);
+    maxTouch = Math.max(maxTouch, active.size); report(e);
+    if (e.pointerType === 'touch') set('touch', 'ok', 'נגיעה התקבלה (pointerType=touch). maxTouchPoints=' + navigator.maxTouchPoints);
+    else if (rows.get('touch').status !== 'ok') set('touch', 'warn', 'התקבל אירוע מסוג ' + e.pointerType + '. כדי לבדוק מגע, גע במסך באצבע');
+    if (maxTouch >= 2) set('multi', 'ok', 'זוהו ' + maxTouch + ' אצבעות בבת אחת, אז צביטה לזום תעבוד');
+  });
+  pad.addEventListener('pointermove', e => { if (!active.has(e.pointerId)) return; active.set(e.pointerId, pos(e)); moves++; report(e); });
+  const up = e => { active.delete(e.pointerId); report(e); };
+  pad.addEventListener('pointerup', up); pad.addEventListener('pointercancel', up);
+})();
+
+// ---------- summary ----------
+let codecLive = false, vidLive = false;
+function updateSummary() {
+  const lines = ['Tesla-Waze browser diagnostics  ' + new Date().toISOString()];
+  for (const r of rows.values()) lines.push('[' + r.status.toUpperCase() + '] ' + r.name + ': ' + r.detail);
+  if (liveStarted) {
+    lines.push('--- live ---');
+    lines.push('canvas fps=' + live.anim.fps + ' stalls=' + live.anim.stalls);
+    lines.push('video  fps=' + (vidLive ? live.vid.fps : 'n/a') + ' stalls=' + live.vid.stalls);
+    lines.push('webcodecs fps=' + (codecLive ? live.dec.fps : 'n/a') + ' latency=' + (live.dec.lat != null ? live.dec.lat.toFixed(0) + 'ms' : 'n/a') + ' stalls=' + live.dec.stalls);
+  }
+  document.getElementById('summary').value = lines.join('\n');
+}
+
+document.getElementById('copyBtn').onclick = async () => {
+  const ta = document.getElementById('summary');
+  try { await navigator.clipboard.writeText(ta.value); }
+  catch { ta.select(); document.execCommand && document.execCommand('copy'); }
+};
+document.getElementById('fsBtn').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(e => set('fs', 'warn', 'הבקשה נדחתה: ' + e.message));
+};
+
+let ran = false;
+document.getElementById('runBtn').onclick = async () => {
+  if (ran) return location.reload();
+  ran = true; document.getElementById('runBtn').textContent = 'הרץ מחדש';
+  testEnv(); testMisc();
+  startAnim(); vidLive = !!document.getElementById('cvAnim').captureStream;
+  liveStarted = performance.now();
+  const canEncode = await testWebCodecs();
+  if (canEncode) { try { startCodecLoop(); codecLive = true; } catch (e) { set('enc', 'bad', e.message); } }
+  await Promise.all([testWebRTCLoopback(), testStun(), testWebSocket()]);
+  updateSummary();
+};
+</script>
+</body>
+</html>
